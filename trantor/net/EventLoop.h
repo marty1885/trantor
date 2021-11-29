@@ -283,6 +283,11 @@ class TRANTOR_EXPORT EventLoop : NonCopyable
     void runOnQuit(Func &&cb);
     void runOnQuit(const Func &cb);
 
+    Poller *getPoller()
+    {
+        return poller_.get();
+    }
+
   private:
     void abortNotInLoopThread();
     void wakeup();

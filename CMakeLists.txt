@@ -76,6 +76,7 @@ if(MINGW)
 endif(MINGW)
 
 set(TRANTOR_SOURCES
+    trantor/utils/AsyncFileIo.cc
     trantor/utils/AsyncFileLogger.cc
     trantor/utils/ConcurrentTaskQueue.cc
     trantor/utils/Date.cc
@@ -174,6 +175,10 @@ if (NOT ATOMIC_WITHOUT_LINKING)
     target_link_libraries(${PROJECT_NAME} PUBLIC atomic)
 endif ()
 file(REMOVE ${CMAKE_BINARY_DIR}/test_atomic.cpp)
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  target_link_libraries(${PROJECT_NAME} PRIVATE uring)
+endif()
 
 set_target_properties(${PROJECT_NAME} PROPERTIES CXX_STANDARD 14)
 set_target_properties(${PROJECT_NAME} PROPERTIES CXX_STANDARD_REQUIRED ON)

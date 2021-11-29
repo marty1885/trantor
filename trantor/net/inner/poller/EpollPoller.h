@@ -17,6 +17,10 @@
 #include "../Poller.h"
 #include <trantor/utils/NonCopyable.h>
 #include <trantor/net/EventLoop.h>
+#include <trantor/utils/MsgBuffer.h>
+#ifdef __linux__
+#include <liburing.h>
+#endif
 
 #if defined __linux__ || defined _WIN32
 #include <memory>
@@ -25,6 +29,12 @@ using EventList = std::vector<struct epoll_event>;
 #endif
 namespace trantor
 {
+
+enum class OperationType
+{
+    Read = 0,
+    Write = 1
+};
 class Channel;
 
 class EpollPoller : public Poller
@@ -59,6 +69,29 @@ class EpollPoller : public Poller
     ChannelMap channels_;
 #endif
     void fillActiveChannels(int numEvents, ChannelList *activeChannels) const;
+#endif
+
+// io_uring support
+#ifdef __linux__
+  public:
+    io_uring ring;
+    struct IoData
+    {
+        std::function<void(MsgBuffer &&)> callback;
+        std::function<void()> errCallback;
+        std::vector<iovec> iovecs;
+        OperationType opType;
+    };
+    void pollIoUring();
+    void submitReadRequst(int fd,
+                          size_t size,
+                          std::function<void(MsgBuffer &&buffer)> callback,
+                          std::function<void()> errCallback);
+    bool haveIoUring_;
+    bool supportIoUring() const
+    {
+        return haveIoUring_;
+    }
 #endif
 };
 }  // namespace trantor

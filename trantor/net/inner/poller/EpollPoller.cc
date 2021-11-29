@@ -60,6 +60,17 @@ EpollPoller::EpollPoller(EventLoop *loop)
 #endif
       events_(kInitEventListSize)
 {
+#ifdef __linux__
+    if (io_uring_queue_init(8, &ring, 0) != 0)
+    {
+        LOG_DEBUG << "Failed to initialize io_uring. code " << errno;
+        haveIoUring_ = false;
+    }
+    else
+    {
+        haveIoUring_ = true;
+    }
+#endif
 }
 EpollPoller::~EpollPoller()
 {
@@ -77,6 +88,8 @@ void EpollPoller::postEvent(uint64_t event)
 #endif
 void EpollPoller::poll(int timeoutMs, ChannelList *activeChannels)
 {
+    // FIXME: epoll_wait blocks to timeoutMs. Which does not unblock when
+    // io_uring is ready. Causing io_uring to have massive delay
     int numEvents = ::epoll_wait(epollfd_,
                                  &*events_.begin(),
                                  static_cast<int>(events_.size()),
@@ -105,6 +118,9 @@ void EpollPoller::poll(int timeoutMs, ChannelList *activeChannels)
             LOG_SYSERR << "EPollEpollPoller::poll()";
         }
     }
+
+    pollIoUring();
+
     return;
 }
 void EpollPoller::fillActiveChannels(int numEvents,
@@ -220,6 +236,86 @@ void EpollPoller::update(int operation, Channel *channel)
             //  << " fd =" << fd;
         }
     }
+}
+
+void EpollPoller::submitReadRequst(
+    int fd,
+    size_t size,
+    std::function<void(MsgBuffer &&buffer)> callback,
+    std::function<void()> errCallback)
+{
+    constexpr size_t blockSize = 1024;
+    size_t remainingBytes = size;
+    const size_t numBlocks = size / blockSize + (size % blockSize ? 1 : 0);
+    IoData *ioData = new IoData;
+    ioData->callback = std::move(callback);
+    ioData->errCallback = std::move(errCallback);
+    ioData->iovecs.resize(numBlocks);
+    ioData->opType = OperationType::Read;
+
+    for (size_t i = 0; remainingBytes; i++)
+    {
+        size_t bytesToRead = std::min(remainingBytes, blockSize);
+
+        ioData->iovecs[i].iov_len = bytesToRead;
+        void *buf;
+        if (posix_memalign(&buf, blockSize, blockSize))
+        {
+            LOG_TRACE << "Failed to allocate memory for io_uring";
+            abort();
+        }
+        ioData->iovecs[i].iov_base = buf;
+        remainingBytes -= bytesToRead;
+    }
+
+    LOG_TRACE << "Submiting IO to io_uring, fd = " << fd;
+
+    io_uring_sqe *sqe = io_uring_get_sqe(&ring);
+    io_uring_prep_readv(sqe, fd, ioData->iovecs.data(), numBlocks, 0);
+    io_uring_sqe_set_data(sqe, ioData);
+    io_uring_submit(&ring);
+}
+
+void EpollPoller::pollIoUring()
+{
+#ifdef __linux__
+    if (haveIoUring_ == false)
+        return;
+    unsigned count;
+    do
+    {
+        io_uring_cqe *cqes;
+        count = io_uring_peek_batch_cqe(&ring,
+                                        &cqes,
+                                        4);  // XXX: is 4 the correct value?
+        for (unsigned i = 0; i < count; i++)
+        {
+            LOG_TRACE << "io_uring command finished";
+            auto cqe = cqes + i;
+            IoData *ioData = (IoData *)io_uring_cqe_get_data(cqe);
+
+            if (cqe->res < 0)
+            {
+                LOG_ERROR << "io_uring operation failed: "
+                          << strerror(-cqe->res);
+                ioData->errCallback();
+            }
+            else if (ioData->opType == OperationType::Read)
+            {
+                MsgBuffer buf;
+                buf.ensureWritableBytes(ioData->iovecs.size() * 1024);
+                for (const auto &vec : ioData->iovecs)
+                {
+                    buf.append((const char *)vec.iov_base, vec.iov_len);
+                    free(vec.iov_base);
+                }
+                if (ioData->callback)
+                    ioData->callback(std::move(buf));
+            }
+            io_uring_cqe_seen(&ring, &cqes[i]);
+        }
+    } while (count != 0);
+#endif
 }
 #else
 EpollPoller::EpollPoller(EventLoop *loop) : Poller(loop)
