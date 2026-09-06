@@ -19,6 +19,7 @@
 #include <trantor/net/inner/TLSProvider.h>
 #include <trantor/net/inner/BufferNode.h>
 #include <list>
+#include <atomic>
 #include <mutex>
 #ifndef _WIN32
 #include <unistd.h>
@@ -245,7 +246,9 @@ class TcpConnectionImpl : public TcpConnection,
     void startPendingEncryption();
     void finishEncryptionHandshake();
     InetAddress localAddr_, peerAddr_;
-    ConnStatus status_{ConnStatus::Connecting};
+    // Written by the owning loop and queried by thread-safe public entry
+    // points such as connected() and AsyncStream::send().
+    std::atomic<ConnStatus> status_{ConnStatus::Connecting};
     void handleClose();
     void handleError();
     // virtual void sendInLoop(const std::string &msg);

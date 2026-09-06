@@ -232,15 +232,21 @@ void EpollPoller::update(int operation, Channel *channel)
     int fd = channel->fd();
     if (::epoll_ctl(epollfd_, operation, fd, &event) < 0)
     {
-        if (operation == EPOLL_CTL_DEL)
+        const int savedErrno = errno;
+        // Closing a descriptor removes it from epoll, DEL can race EBADF/ENOENT.
+        // ADD and MOD failures then needs cleanup: ignoring one hangs a live
+        // connection with no possible readiness callback.
+        if (operation == EPOLL_CTL_DEL &&
+            (savedErrno == EBADF || savedErrno == ENOENT))
         {
-            // LOG_SYSERR << "epoll_ctl op =" << operationToString(operation) <<
-            // " fd =" << fd;
+            LOG_TRACE << "epoll_ctl DEL fd=" << fd << " failed: "
+                      << strerror_tl(savedErrno);
         }
         else
         {
-            //  LOG_SYSFATAL << "epoll_ctl op =" << operationToString(operation)
-            //  << " fd =" << fd;
+            errno = savedErrno;
+            LOG_SYSERR << "epoll_ctl operation=" << operation
+                       << " fd=" << fd << " events=" << event.events;
         }
     }
 }

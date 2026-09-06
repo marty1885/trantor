@@ -103,6 +103,22 @@ void Connector::connect()
             {
                 retry(fd_);
             }
+            else
+            {
+                // A nonblocking connect can fail before Channel creation.
+                // Leaving the descriptor alone without notifying TcpClient, and
+                // only gets cleaned up by TcpClient's own timeout
+                socketHanded_ = true;
+#ifndef _WIN32
+                ::close(fd_);
+#else
+                closesocket(fd_);
+#endif
+                fd_ = -1;
+                status_ = Status::Disconnected;
+                if (errorCallback_)
+                    errorCallback_();
+            }
             break;
 
         case EACCES:
@@ -252,7 +268,9 @@ void Connector::handleError()
         status_ = Status::Disconnected;
         int sockfd = removeAndResetChannel();
         int err = Socket::getSocketError(sockfd);
-        LOG_TRACE << "SO_ERROR = " << err << " " << strerror_tl(err);
+        LOG_WARN << "Connector::handleError - peer="
+                 << serverAddr_.toIpPort() << " SO_ERROR=" << err << " "
+                 << strerror_tl(err);
         if (retry_)
         {
             retry(sockfd);
