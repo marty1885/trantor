@@ -171,6 +171,7 @@ void KQueue::removeChannel(Channel *channel)
 void KQueue::update(Channel *channel)
 {
     struct kevent ev[2];
+    struct kevent receipts[2];
     int n = 0;
     auto events = channel->events();
     int oldEvents = 0;
@@ -187,7 +188,7 @@ void KQueue::update(Channel *channel)
         EV_SET(&ev[n++],
                fd,
                EVFILT_READ,
-               EV_ADD | EV_ENABLE,
+               EV_ADD | EV_ENABLE | EV_RECEIPT,
                0,
                0,
                (void *)(intptr_t)channel);
@@ -198,7 +199,7 @@ void KQueue::update(Channel *channel)
         EV_SET(&ev[n++],
                fd,
                EVFILT_READ,
-               EV_DELETE,
+               EV_DELETE | EV_RECEIPT,
                0,
                0,
                (void *)(intptr_t)channel);
@@ -209,7 +210,7 @@ void KQueue::update(Channel *channel)
         EV_SET(&ev[n++],
                fd,
                EVFILT_WRITE,
-               EV_ADD | EV_ENABLE,
+               EV_ADD | EV_ENABLE | EV_RECEIPT,
                0,
                0,
                (void *)(intptr_t)channel);
@@ -220,12 +221,45 @@ void KQueue::update(Channel *channel)
         EV_SET(&ev[n++],
                fd,
                EVFILT_WRITE,
-               EV_DELETE,
+               EV_DELETE | EV_RECEIPT,
                0,
                0,
                (void *)(intptr_t)channel);
     }
-    kevent(kqfd_, ev, n, NULL, 0, NULL);
+    if (n == 0)
+        return;
+
+    const int numReceipts = kevent(kqfd_, ev, n, receipts, n, NULL);
+    if (numReceipts < 0)
+    {
+        LOG_SYSERR << "kevent update fd=" << fd;
+        return;
+    }
+
+    for (int i = 0; i < numReceipts; ++i)
+    {
+        if (!(receipts[i].flags & EV_ERROR) || receipts[i].data == 0)
+            continue;
+
+        const int error = static_cast<int>(receipts[i].data);
+        const bool isDelete = ev[i].flags & EV_DELETE;
+        const char *operation = isDelete ? "DELETE" : "ADD";
+        const char *filter = ev[i].filter == EVFILT_READ ? "READ"
+                             : ev[i].filter == EVFILT_WRITE ? "WRITE"
+                                                           : "UNKNOWN";
+        if (isDelete && (error == EBADF || error == ENOENT))
+        {
+            LOG_TRACE << "kevent " << operation << " fd=" << fd
+                      << " filter=" << filter
+                      << " failed: " << strerror_tl(error);
+        }
+        else
+        {
+            errno = error;
+            LOG_SYSERR << "kevent operation=" << operation << " fd=" << fd
+                       << " filter=" << filter;
+        }
+    }
 }
 #else
 KQueue::KQueue(EventLoop *loop) : Poller(loop)
