@@ -53,6 +53,8 @@ inline trantor::Logger::LogLevel clamp(trantor::Logger::LogLevel v,
 
 namespace trantor
 {
+constexpr size_t Logger::kMaxChannels;
+
 // helper class for known string length at compile time
 class T
 {

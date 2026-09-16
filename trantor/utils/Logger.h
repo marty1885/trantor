@@ -18,10 +18,10 @@
 #include <trantor/utils/Date.h>
 #include <trantor/utils/LogStream.h>
 #include <trantor/exports.h>
+#include <array>
 #include <cstring>
 #include <functional>
 #include <iostream>
-#include <vector>
 namespace spdlog
 {
 class logger;
@@ -39,6 +39,8 @@ namespace trantor
 class TRANTOR_EXPORT Logger : public NonCopyable
 {
   public:
+    static constexpr size_t kMaxChannels = 64;
+
     enum LogLevel
     {
         kTrace = 0,
@@ -118,7 +120,8 @@ class TRANTOR_EXPORT Logger : public NonCopyable
      *
      * @param outputFunc The function to output a log message.
      * @param flushFunc The function to flush.
-     * @param index The channel index.
+     * @param index The channel index in [0, kMaxChannels), or a negative value
+     * for the default channel. Out-of-range positive indices are ignored.
      * @note Logs are output to the standard output by default.
      */
     static void setOutputFunction(
@@ -131,7 +134,7 @@ class TRANTOR_EXPORT Logger : public NonCopyable
             outputFunc_() = outputFunc;
             flushFunc_() = flushFunc;
         }
-        else
+        else if (static_cast<size_t>(index) < kMaxChannels)
         {
             outputFunc_(index) = outputFunc;
             flushFunc_(index) = flushFunc;
@@ -303,30 +306,27 @@ class TRANTOR_EXPORT Logger : public NonCopyable
     static std::function<void(const char *msg, const uint64_t len)> &
     outputFunc_(size_t index)
     {
-        static std::vector<
-            std::function<void(const char *msg, const uint64_t len)>>
-            outputFuncs;
-        if (index < outputFuncs.size())
-        {
-            return outputFuncs[index];
-        }
-        while (index >= outputFuncs.size())
-        {
-            outputFuncs.emplace_back(outputFunc_());
-        }
+        using OutputFunc =
+            std::function<void(const char *msg, const uint64_t len)>;
+        static std::array<OutputFunc, kMaxChannels> outputFuncs = []() {
+            std::array<OutputFunc, kMaxChannels> funcs;
+            funcs.fill(outputFunc_());
+            return funcs;
+        }();
+        if (index >= kMaxChannels)
+            return outputFunc_();
         return outputFuncs[index];
     }
     static std::function<void()> &flushFunc_(size_t index)
     {
-        static std::vector<std::function<void()>> flushFuncs;
-        if (index < flushFuncs.size())
-        {
-            return flushFuncs[index];
-        }
-        while (index >= flushFuncs.size())
-        {
-            flushFuncs.emplace_back(flushFunc_());
-        }
+        using FlushFunc = std::function<void()>;
+        static std::array<FlushFunc, kMaxChannels> flushFuncs = []() {
+            std::array<FlushFunc, kMaxChannels> funcs;
+            funcs.fill(flushFunc_());
+            return funcs;
+        }();
+        if (index >= kMaxChannels)
+            return flushFunc_();
         return flushFuncs[index];
     }
     friend class RawLogger;

@@ -12,6 +12,8 @@
 #include <map>
 #include <memory>
 #include <string.h>
+#include <chrono>
+#include <deque>
 
 extern "C"
 {
@@ -113,20 +115,40 @@ class AresResolver : public Resolver,
         AresResolver* owner_;
         ResolverResultsCallback callback_;
         std::string hostname_;
+        std::chrono::steady_clock::time_point started_;
+        std::chrono::milliseconds retryDelay_{250};
         QueryData(AresResolver* o,
                   const ResolverResultsCallback& cb,
                   const std::string& hostname)
-            : owner_(o), callback_(cb), hostname_(hostname)
+            : owner_(o),
+              callback_(cb),
+              hostname_(hostname),
+              started_(std::chrono::steady_clock::now())
         {
         }
     };
+    struct PendingQuery
+    {
+        std::string hostname_;
+        ResolverResultsCallback callback_;
+    };
     void resolveInLoop(const std::string& hostname,
                        const ResolverResultsCallback& cb);
+    void dispatchPending();
+    void scheduleDispatch();
+    bool retryTransientQuery(int status, QueryData* query);
     void init();
     trantor::EventLoop* loop_;
     std::shared_ptr<bool> loopValid_;
     ares_channel ctx_{nullptr};
+    TimerId timerId_{0};
     bool timerActive_{false};
+    std::chrono::steady_clock::time_point timerDeadline_{};
+    std::deque<PendingQuery> pendingQueries_;
+    size_t activeQueries_{0};
+    bool dispatchScheduled_{false};
+    bool destroying_{false};
+    static constexpr size_t kMaxActiveQueries = 8;
     using ChannelList = std::map<int, std::unique_ptr<trantor::Channel>>;
     ChannelList channels_;
     static std::unordered_map<
@@ -155,9 +177,11 @@ class AresResolver : public Resolver,
     }
     const size_t timeout_{60};
 
-    void onRead(int sockfd);
+    void onSocketEvent(int sockfd);
     void onTimer();
+    void updateTimer();
     void onQueryResult(int status,
+                       int timeouts,
                        struct ares_addrinfo* result,
                        const std::string& hostname,
                        const ResolverResultsCallback& callback);
