@@ -258,6 +258,7 @@ static bool isDirectory(const std::string &path)
 #endif
 }
 
+#ifndef LIBRESSL_VERSION_NUMBER
 static std::string lastOpenSSLError()
 {
     const auto error = ERR_get_error();
@@ -267,6 +268,7 @@ static std::string lastOpenSSLError()
     ERR_error_string_n(error, message.data(), message.size());
     return message.data();
 }
+#endif
 
 static void freeCertificateNames(STACK_OF(X509_NAME) * names)
 {
@@ -1205,17 +1207,6 @@ struct OpenSSLProvider : public TLSProvider, public NonCopyable
         return provider->selectServerCertificate(alert);
     }
 
-    static int configureServerCertificate(SSL *ssl, void *)
-    {
-        auto *provider = static_cast<OpenSSLProvider *>(
-            SSL_get_ex_data(ssl, providerIndex()));
-        int alert = SSL_AD_UNRECOGNIZED_NAME;
-        return provider != nullptr && provider->selectServerCertificate(
-                                          &alert) == SSL_TLSEXT_ERR_OK
-                   ? 1
-                   : 0;
-    }
-
 #if OPENSSL_VERSION_NUMBER >= 0x10101000L
     // NOTE: LibreSSL doesn't seem to have an resumption implementation
     // and the API does nothing. Welp. Keeping it until supported I guess
@@ -1246,6 +1237,10 @@ struct OpenSSLProvider : public TLSProvider, public NonCopyable
                                            : SSL_TLSEXT_ERR_ALERT_FATAL;
         serverCertificateSelected_ = true;
         const char *name = SSL_get_servername(ssl_, TLSEXT_NAMETYPE_host_name);
+        // The context is initialized with the provider's default certificate,
+        // so a client without SNI keeps that certificate.
+        if (name == nullptr)
+            return SSL_TLSEXT_ERR_NOACK;
         try
         {
             const auto certificate =
@@ -1616,13 +1611,35 @@ SSLContextPtr trantor::newSSLContext(const TLSPolicy &policy, bool isServer)
 
     if (isServer && ctx->certificateProvider)
     {
+        // Select the default certificate now, then use SNI to install a
+        // per-connection certificate for named virtual hosts. The provider is
+        // synchronous by contract, so this does not block context construction.
+        ServerCertificate certificate;
+        try
+        {
+            certificate = ctx->certificateProvider("");
+        }
+        catch (const std::exception &e)
+        {
+            throw std::runtime_error(
+                "Server certificate provider failed: " + std::string(e.what()));
+        }
+        catch (...)
+        {
+            throw std::runtime_error("Server certificate provider failed");
+        }
+        if (certificate.certificatePem.empty() ||
+            certificate.privateKeyPem.empty() ||
+            !loadCertificatePem(ctx->ctx(),
+                                certificate.certificatePem,
+                                certificate.privateKeyPem))
+            throw std::runtime_error(
+                "Server certificate provider returned an invalid default certificate");
+
         SSL_CTX_set_tlsext_servername_callback(
             ctx->ctx(),
             static_cast<int (*)(SSL *, int *, void *)>(
                 &OpenSSLProvider::selectServerCertificate));
-        SSL_CTX_set_cert_cb(ctx->ctx(),
-                            &OpenSSLProvider::configureServerCertificate,
-                            nullptr);
         // A resumed handshake may not select a certificate at all. Do not
         // resume one without consulting the current runtime provider.
         SSL_CTX_set_session_cache_mode(ctx->ctx(), SSL_SESS_CACHE_OFF);
