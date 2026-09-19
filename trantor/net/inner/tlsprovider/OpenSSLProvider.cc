@@ -1232,19 +1232,17 @@ struct OpenSSLProvider : public TLSProvider, public NonCopyable
 
     int selectServerCertificate(int *alert)
     {
+        const char *name = SSL_get_servername(ssl_, TLSEXT_NAMETYPE_host_name);
+        if (name == nullptr)
+            return SSL_TLSEXT_ERR_NOACK;
         if (serverCertificateSelected_)
             return serverCertificateValid_ ? SSL_TLSEXT_ERR_OK
                                            : SSL_TLSEXT_ERR_ALERT_FATAL;
         serverCertificateSelected_ = true;
-        const char *name = SSL_get_servername(ssl_, TLSEXT_NAMETYPE_host_name);
-        // The context is initialized with the provider's default certificate,
-        // so a client without SNI keeps that certificate.
-        if (name == nullptr)
-            return SSL_TLSEXT_ERR_NOACK;
         try
         {
             const auto certificate =
-                contextPtr_->certificateProvider(name ? name : "");
+                contextPtr_->certificateProvider(name);
             if (!certificate.certificatePem.empty() &&
                 !certificate.privateKeyPem.empty() &&
                 loadCertificatePem(ssl_,
@@ -1611,31 +1609,6 @@ SSLContextPtr trantor::newSSLContext(const TLSPolicy &policy, bool isServer)
 
     if (isServer && ctx->certificateProvider)
     {
-        // Select the default certificate now, then use SNI to install a
-        // per-connection certificate for named virtual hosts. The provider is
-        // synchronous by contract, so this does not block context construction.
-        ServerCertificate certificate;
-        try
-        {
-            certificate = ctx->certificateProvider("");
-        }
-        catch (const std::exception &e)
-        {
-            throw std::runtime_error(
-                "Server certificate provider failed: " + std::string(e.what()));
-        }
-        catch (...)
-        {
-            throw std::runtime_error("Server certificate provider failed");
-        }
-        if (certificate.certificatePem.empty() ||
-            certificate.privateKeyPem.empty() ||
-            !loadCertificatePem(ctx->ctx(),
-                                certificate.certificatePem,
-                                certificate.privateKeyPem))
-            throw std::runtime_error(
-                "Server certificate provider returned an invalid default certificate");
-
         SSL_CTX_set_tlsext_servername_callback(
             ctx->ctx(),
             static_cast<int (*)(SSL *, int *, void *)>(
