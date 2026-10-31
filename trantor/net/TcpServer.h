@@ -23,6 +23,7 @@
 #include <trantor/utils/TimingWheel.h>
 #include <csignal>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <string>
 
@@ -269,11 +270,19 @@ class TRANTOR_EXPORT TcpServer : NonCopyable
     void reloadSSL();
 
   private:
+    struct CallbackLifetime
+    {
+        std::mutex mutex;
+        bool alive{true};
+    };
+
     void handleCloseInLoop(const TcpConnectionPtr &connectionPtr);
     void newConnection(int fd, const InetAddress &peer);
     void connectionClosed(const TcpConnectionPtr &connectionPtr);
 
     EventLoop *loop_;
+    std::shared_ptr<CallbackLifetime> callbackLifetime_{
+        std::make_shared<CallbackLifetime>()};
     std::unique_ptr<Acceptor> acceptorPtr_;
     std::string serverName_;
     std::set<TcpConnectionPtr> connSet_;

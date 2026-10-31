@@ -20,6 +20,7 @@
 #include <trantor/net/inner/BufferNode.h>
 #include <list>
 #include <mutex>
+#include <atomic>
 #ifndef _WIN32
 #include <unistd.h>
 #endif
@@ -245,7 +246,7 @@ class TcpConnectionImpl : public TcpConnection,
     void startPendingEncryption();
     void finishEncryptionHandshake();
     InetAddress localAddr_, peerAddr_;
-    ConnStatus status_{ConnStatus::Connecting};
+    std::atomic<ConnStatus> status_{ConnStatus::Connecting};
     void handleClose();
     void handleError();
     // virtual void sendInLoop(const std::string &msg);

@@ -48,6 +48,34 @@ TEST(MsgBufferTest, addInFrontTest)
     EXPECT_EQ(84, buffer.writableBytes());
 }
 
+TEST(MsgBufferTest, appendFromOwnStorage)
+{
+    MsgBuffer buffer(1);
+    buffer.append("0123456789", 10);
+    buffer.append(buffer.peek(), buffer.readableBytes());
+    EXPECT_EQ("01234567890123456789",
+              buffer.read(buffer.readableBytes()));
+
+    buffer.append("abcdef", 6);
+    buffer.retrieve(2);
+    buffer.append(buffer.peek(), buffer.readableBytes());
+    EXPECT_EQ("cdefcdef", buffer.read(buffer.readableBytes()));
+}
+
+TEST(MsgBufferTest, appendSelf)
+{
+    MsgBuffer growing(1);
+    growing.append("abc", 3);
+    growing.append(growing);
+    EXPECT_EQ("abcabc", growing.read(growing.readableBytes()));
+
+    MsgBuffer compacting(10);
+    compacting.append("01234567", 8);
+    compacting.retrieve(4);
+    compacting.append(compacting);
+    EXPECT_EQ("45674567", compacting.read(compacting.readableBytes()));
+}
+
 TEST(MsgBuffer, MoveContrustor)
 {
     MsgBuffer buf1(100);

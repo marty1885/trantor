@@ -24,6 +24,7 @@
 #endif
 #include <errno.h>
 #include <assert.h>
+#include <functional>
 
 using namespace trantor;
 namespace trantor
@@ -68,13 +69,25 @@ void MsgBuffer::swap(MsgBuffer &buf) noexcept
 void MsgBuffer::append(const MsgBuffer &buf)
 {
     ensureWritableBytes(buf.readableBytes());
-    memcpy(&buffer_[tail_], buf.peek(), buf.readableBytes());
+    memcpy(begin() + tail_, buf.peek(), buf.readableBytes());
     tail_ += buf.readableBytes();
 }
 void MsgBuffer::append(const char *buf, size_t len)
 {
+    if (len == 0)
+        return;
+
+    const std::less<const char *> less;
+    if (!less(buf, begin()) && less(buf, begin() + buffer_.size()))
+    {
+        // Growing or compacting this buffer can invalidate an internal source.
+        std::string copy(buf, len);
+        append(copy.data(), copy.size());
+        return;
+    }
+
     ensureWritableBytes(len);
-    memcpy(&buffer_[tail_], buf, len);
+    memcpy(begin() + tail_, buf, len);
     tail_ += len;
 }
 void MsgBuffer::appendInt16(const uint16_t s)

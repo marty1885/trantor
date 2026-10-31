@@ -43,6 +43,10 @@ TcpServer::TcpServer(EventLoop *loop,
 
 TcpServer::~TcpServer()
 {
+    {
+        std::lock_guard<std::mutex> lock(callbackLifetime_->mutex);
+        callbackLifetime_->alive = false;
+    }
     // loop_->assertInLoopThread();
     LOG_TRACE << "TcpServer::~TcpServer [" << serverName_ << "] destructing";
 }
@@ -237,20 +241,13 @@ void TcpServer::enableSSL(
 
 void TcpServer::reloadSSL()
 {
-    if (loop_->isInLoopThread())
-    {
-        if (policyPtr_)
-        {
+    std::weak_ptr<CallbackLifetime> lifetime = callbackLifetime_;
+    loop_->runInLoop([this, lifetime]() {
+        auto guard = lifetime.lock();
+        if (!guard)
+            return;
+        std::lock_guard<std::mutex> lock(guard->mutex);
+        if (guard->alive && policyPtr_)
             sslContextPtr_ = newSSLContext(*policyPtr_, true);
-        }
-    }
-    else
-    {
-        loop_->queueInLoop([this]() {
-            if (policyPtr_)
-            {
-                sslContextPtr_ = newSSLContext(*policyPtr_, true);
-            }
-        });
-    }
+    });
 }

@@ -218,6 +218,7 @@ class TRANTOR_EXPORT MsgBuffer
      *
      * @param buf
      * @param len
+     * @note The source must not alias this buffer's storage.
      */
     void addInFront(const char *buf, size_t len);
 
@@ -338,12 +339,12 @@ class TRANTOR_EXPORT MsgBuffer
      */
     const char &operator[](size_t offset) const
     {
-        assert(readableBytes() >= offset);
+        assert(offset < readableBytes());
         return peek()[offset];
     }
     char &operator[](size_t offset)
     {
-        assert(readableBytes() >= offset);
+        assert(offset < readableBytes());
         return begin()[head_ + offset];
     }
 

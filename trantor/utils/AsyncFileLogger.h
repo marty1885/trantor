@@ -18,6 +18,7 @@
 #include <trantor/utils/Date.h>
 #include <trantor/exports.h>
 #include <thread>
+#include <atomic>
 #include <mutex>
 #include <string>
 #include <condition_variable>
@@ -124,7 +125,7 @@ class TRANTOR_EXPORT AsyncFileLogger : NonCopyable
     StringPtrQueue tmpBuffers_;
     void writeLogToFile(const StringPtr buf);
     std::unique_ptr<std::thread> threadPtr_;
-    bool stopFlag_{false};
+    std::atomic_bool stopFlag_{false};
     void logThreadFunc();
     std::string filePath_{"./"};
     std::string fileBaseName_{"trantor"};

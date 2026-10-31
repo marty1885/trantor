@@ -1,5 +1,6 @@
 find_package(GTest REQUIRED)
 add_executable(msgbuffer_unittest MsgBufferUnittest.cc)
+add_executable(logstream_unittest LogStreamUnittest.cc)
 add_executable(inetaddress_unittest InetAddressUnittest.cc)
 add_executable(date_unittest DateUnittest.cc)
 add_executable(split_string_unittest splitStringUnittest.cc)
@@ -8,6 +9,7 @@ add_executable(hash_unittest HashUnittest.cc)
 add_executable(tcp_client_retry_unittest TcpClientRetryUnittest.cc)
 set(UNITTEST_TARGETS
     msgbuffer_unittest
+    logstream_unittest
     inetaddress_unittest
     date_unittest
     split_string_unittest

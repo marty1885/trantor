@@ -252,8 +252,13 @@ LogStream &LogStream::operator<<(const long double &v)
 template <typename T>
 Fmt::Fmt(const char *fmt, T val)
 {
-    length_ = snprintf(buf_, sizeof buf_, fmt, val);
-    assert(static_cast<size_t>(length_) < sizeof buf_);
+    const int required = snprintf(buf_, sizeof buf_, fmt, val);
+    if (required < 0)
+        length_ = 0;
+    else if (required >= static_cast<int>(sizeof buf_))
+        length_ = static_cast<int>(sizeof buf_) - 1;
+    else
+        length_ = required;
 }
 
 // Explicit instantiations
