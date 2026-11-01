@@ -908,13 +908,12 @@ struct OpenSSLProvider : public TLSProvider, public NonCopyable
                 // 1.0.2; direct X509_check_* calls are deprecated in 4.1.
                 auto *param = SSL_get0_param(ssl_);
                 const auto &hostname = contextPtr_->hostname;
-                const int configured = internal::isIpLiteral(hostname)
-                                           ? X509_VERIFY_PARAM_set1_ip_asc(
-                                                 param, hostname.c_str())
-                                           : X509_VERIFY_PARAM_set1_host(
-                                                 param,
-                                                 hostname.data(),
-                                                 hostname.size());
+                const int configured =
+                    internal::isIpLiteral(hostname)
+                        ? X509_VERIFY_PARAM_set1_ip_asc(param, hostname.c_str())
+                        : X509_VERIFY_PARAM_set1_host(param,
+                                                      hostname.data(),
+                                                      hostname.size());
                 if (configured != 1)
                 {
                     handleSSLError(SSLError::kSSLInvalidCertificate);
