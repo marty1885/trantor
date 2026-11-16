@@ -1,8 +1,13 @@
 #include <trantor/utils/Date.h>
 #include <gtest/gtest.h>
 #include <string>
+#include <utility>
 #include <vector>
 #include <iostream>
+#ifndef _WIN32
+#include <cstdlib>
+#include <ctime>
+#endif
 using namespace trantor;
 TEST(Date, constructorTest)
 {
@@ -113,6 +118,60 @@ TEST(Date, DatabaseStringTest)
     auto epoch = dbDateGMT.microSecondsSinceEpoch();
     EXPECT_EQ(epoch, 0);
 }
+// A UTC offset after the fractional seconds must not take part in padding the
+// fraction to six digits.
+TEST(Date, DatabaseStringFractionWithOffsetTest)
+{
+    const std::vector<std::pair<std::string, int64_t>> cases{
+        {"2023-07-31 16:19:49.91874+09", 918740},
+        {"2023-07-31 16:19:49.91874+09:00", 918740},
+        {"2023-07-31 16:19:49.91874-05", 918740},
+        {"2023-07-31 16:19:49.91874-05:00", 918740},
+        {"2023-07-31 16:19:49.1+09", 100000},
+        {"2023-07-31 16:19:49.1-05", 100000},
+        {"2023-07-31 16:19:49.000123+09", 123},
+        {"2023-07-31 16:19:49.000123-05", 123},
+        // more digits than a microsecond can hold are truncated
+        {"2023-07-31 16:19:49.1234567+09", 123456},
+        {"2023-07-31 16:19:49.1234567-05", 123456},
+    };
+    for (const auto &c : cases)
+    {
+        EXPECT_EQ(
+            trantor::Date::fromDbString(c.first).microSecondsSinceEpoch() %
+                1000000,
+            c.second)
+            << c.first;
+        EXPECT_EQ(
+            trantor::Date::fromDbStringLocal(c.first).microSecondsSinceEpoch() %
+                1000000,
+            c.second)
+            << c.first;
+    }
+}
+// Without a fractional part, a UTC offset right after the seconds must not
+// change the seconds. Offsets are whole minutes, so checking the position
+// within the minute does not depend on how the offset itself is handled.
+TEST(Date, DatabaseStringOffsetWithoutFractionTest)
+{
+    const std::vector<std::string> cases{
+        "1997-12-17 07:37:16-08",
+        "1997-12-17 07:37:16+09",
+        "1997-12-17 07:37:16-08:00",
+        "1997-12-17 07:37:16+05:30",
+    };
+    for (const auto &c : cases)
+    {
+        EXPECT_EQ(trantor::Date::fromDbString(c).microSecondsSinceEpoch() %
+                      60000000,
+                  16000000)
+            << c;
+        EXPECT_EQ(trantor::Date::fromDbStringLocal(c).microSecondsSinceEpoch() %
+                      60000000,
+                  16000000)
+            << c;
+    }
+}
 TEST(Date, TimezoneTest)
 {
     std::string dat0 = "2024-01-01";
@@ -157,6 +216,163 @@ TEST(Date, TimezoneTest)
     EXPECT_EQ(dateLocal.secondsSinceEpoch() - 4 * 3600,
               trantor::Date::fromISOString(dat0).secondsSinceEpoch());
 }
+
+#ifndef _WIN32
+// The MSVC CRT only understands the legacy "tzn[+|-]hh[:mm[:ss]][dzn]" form of
+// TZ and always applies the US daylight-saving rules, so IANA zone names -- and
+// therefore these tests -- are POSIX-only.
+namespace
+{
+class TzGuard
+{
+  public:
+    explicit TzGuard(const char *tz)
+    {
+        const char *previous = getenv("TZ");
+        had_ = (previous != nullptr);
+        if (had_)
+            old_ = previous;
+        setenv("TZ", tz, 1);
+        // localtime_r() is not required to call tzset() implicitly.
+        tzset();
+    }
+    ~TzGuard()
+    {
+        if (had_)
+            setenv("TZ", old_.c_str(), 1);
+        else
+            unsetenv("TZ");
+        tzset();
+    }
+    TzGuard(const TzGuard &) = delete;
+    TzGuard &operator=(const TzGuard &) = delete;
+
+  private:
+    std::string old_;
+    bool had_{false};
+};
+
+// Precondition check that does not go through trantor: if the zoneinfo
+// database is missing, the C library silently falls back to UTC and the
+// expectations below would be meaningless.
+bool zoneLoaded(time_t instant, long expectedOffset)
+{
+    struct tm tmv;
+    if (localtime_r(&instant, &tmv) == nullptr)
+        return false;
+    return tmv.tm_gmtoff == expectedOffset;
+}
+
+constexpr time_t kWinter = 1767225600;  // 2026-01-01T00:00:00Z
+constexpr time_t kSummer = 1782864000;  // 2026-07-01T00:00:00Z
+}  // namespace
+
+// Regression test for https://github.com/an-tao/trantor/issues/401: the offset
+// must be the one in effect at the given instant, not a constant sampled at
+// 1970-01-01.
+TEST(Date, timezoneOffsetFollowsDst)
+{
+    TzGuard tz("Europe/Paris");
+    if (!zoneLoaded(kWinter, 3600))
+        GTEST_SKIP() << "zoneinfo for Europe/Paris is not available";
+
+    EXPECT_EQ(trantor::Date::timezoneOffset(kWinter), 3600);  // CET
+    EXPECT_EQ(trantor::Date::timezoneOffset(kSummer), 7200);  // CEST
+}
+
+// A zone whose standard offset itself changed after 1970 must not be pinned to
+// its 1970 value either.
+TEST(Date, timezoneOffsetFollowsHistoricalChanges)
+{
+    TzGuard tz("Europe/Lisbon");
+    if (!zoneLoaded(kWinter, 0))
+        GTEST_SKIP() << "zoneinfo for Europe/Lisbon is not available";
+
+    EXPECT_EQ(trantor::Date::timezoneOffset(0), 3600);        // CET in 1970
+    EXPECT_EQ(trantor::Date::timezoneOffset(kWinter), 0);     // WET today
+    EXPECT_EQ(trantor::Date::timezoneOffset(kSummer), 3600);  // WEST today
+}
+
+TEST(Date, timezoneOffsetSouthernHemisphere)
+{
+    TzGuard tz("America/Santiago");
+    if (!zoneLoaded(kWinter, -10800))
+        GTEST_SKIP() << "zoneinfo for America/Santiago is not available";
+
+    // January is summer time here, July is not.
+    EXPECT_EQ(trantor::Date::timezoneOffset(kWinter), -10800);
+    EXPECT_EQ(trantor::Date::timezoneOffset(kSummer), -14400);
+}
+
+TEST(Date, toDbStringIsUtcAcrossDst)
+{
+    TzGuard tz("Europe/Paris");
+    if (!zoneLoaded(kWinter, 3600))
+        GTEST_SKIP() << "zoneinfo for Europe/Paris is not available";
+
+    const trantor::Date summer(static_cast<int64_t>(kSummer) *
+                               trantor::Date::MICRO_SECONDS_PER_SEC);
+    EXPECT_EQ(summer.toDbString(), "2026-07-01");
+    EXPECT_EQ(summer.toDbStringLocal(), "2026-07-01 02:00:00");
+
+    const trantor::Date winter(static_cast<int64_t>(kWinter) *
+                               trantor::Date::MICRO_SECONDS_PER_SEC);
+    EXPECT_EQ(winter.toDbString(), "2026-01-01");
+    EXPECT_EQ(winter.toDbStringLocal(), "2026-01-01 01:00:00");
+}
+
+TEST(Date, dbStringRoundTripAcrossTimezones)
+{
+    const char *zones[] = {"Europe/Paris",
+                           "America/New_York",
+                           "Asia/Tokyo",
+                           "America/Santiago",
+                           "Australia/Sydney",
+                           "Asia/Kathmandu",
+                           "UTC"};
+    const int64_t instants[] = {0, kWinter, kSummer, 1234567890, 2000000000};
+    for (const char *zone : zones)
+    {
+        TzGuard tz(zone);
+        for (int64_t seconds : instants)
+        {
+            const trantor::Date d(seconds *
+                                  trantor::Date::MICRO_SECONDS_PER_SEC);
+            EXPECT_EQ(trantor::Date::fromDbString(d.toDbString()), d)
+                << zone << " @" << seconds;
+            EXPECT_EQ(trantor::Date::fromDbStringLocal(d.toDbStringLocal()), d)
+                << zone << " @" << seconds;
+        }
+    }
+}
+
+// An ISO string that carries its own offset must parse to the same instant no
+// matter what the local time zone is.
+TEST(Date, fromISOStringIgnoresLocalTimezone)
+{
+    const char *zones[] = {"Europe/Paris",
+                           "America/New_York",
+                           "Asia/Tokyo",
+                           "Australia/Sydney",
+                           "UTC"};
+    for (const char *zone : zones)
+    {
+        TzGuard tz(zone);
+        EXPECT_EQ(trantor::Date::fromISOString("2026-07-01T00:00:00Z")
+                      .secondsSinceEpoch(),
+                  kSummer)
+            << zone;
+        EXPECT_EQ(trantor::Date::fromISOString("2026-07-01T02:00:00+02:00")
+                      .secondsSinceEpoch(),
+                  kSummer)
+            << zone;
+        EXPECT_EQ(trantor::Date::fromISOString("2025-12-31T19:00:00-0500")
+                      .secondsSinceEpoch(),
+                  kWinter)
+            << zone;
+    }
+}
+#endif  // !_WIN32
 
 int main(int argc, char **argv)
 {

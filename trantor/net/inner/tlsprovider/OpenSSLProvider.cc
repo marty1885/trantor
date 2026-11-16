@@ -92,6 +92,7 @@ static bool validatePeerCertificate(SSL *ssl,
     assert(cert != nullptr);
     LOG_TRACE << "Validating peer certificate";
 
+#if OPENSSL_VERSION_NUMBER < 0x10002000L || defined(LIBRESSL_VERSION_NUMBER)
     if (!isServer && !hostname.empty())
     {
         // X509_check_host() only matches DNS names. Try the textual IP helper
@@ -110,8 +111,23 @@ static bool validatePeerCertificate(SSL *ssl,
             return false;
         }
     }
+#else
+    (void)hostname;
+    (void)isServer;
+#endif
 
     auto result = SSL_get_verify_result(ssl);
+#if OPENSSL_VERSION_NUMBER >= 0x40000000L && !defined(LIBRESSL_VERSION_NUMBER)
+    // X509_check_certificate_times() returns 1 only if both notBefore and
+    // notAfter are valid ASN.1 times and the current time is within them.
+    int timeError = X509_V_OK;
+    if (X509_check_certificate_times(nullptr, cert, &timeError) != 1)
+    {
+        LOG_TRACE << "Peer certificate date validation failed: "
+                  << X509_verify_cert_error_string(timeError);
+        return false;
+    }
+#else
 #if OPENSSL_VERSION_NUMBER < 0x10100000L || defined(LIBRESSL_VERSION_NUMBER)
     const ASN1_TIME *notBeforeTime = X509_get_notBefore(cert);
     const ASN1_TIME *notAfterTime = X509_get_notAfter(cert);
@@ -128,6 +144,7 @@ static bool validatePeerCertificate(SSL *ssl,
         LOG_TRACE << "Peer certificate date validation failed";
         return false;
     }
+#endif
 
     if (result != X509_V_OK && !allowBrokenChain)
     {
@@ -258,6 +275,7 @@ static bool isDirectory(const std::string &path)
 #endif
 }
 
+#ifndef LIBRESSL_VERSION_NUMBER
 static std::string lastOpenSSLError()
 {
     const auto error = ERR_get_error();
@@ -267,6 +285,7 @@ static std::string lastOpenSSLError()
     ERR_error_string_n(error, message.data(), message.size());
     return message.data();
 }
+#endif
 
 static void freeCertificateNames(STACK_OF(X509_NAME) * names)
 {
@@ -660,8 +679,17 @@ bool loadCertificatePem(SSL *ssl,
     return SSL_check_private_key(ssl) == 1;
 }
 
-int acceptUnverifiedPeerCertificate(int, X509_STORE_CTX *)
+int acceptUnverifiedPeerCertificate(int, X509_STORE_CTX *storeCtx)
 {
+#if OPENSSL_VERSION_NUMBER >= 0x10002000L && !defined(LIBRESSL_VERSION_NUMBER)
+    // An untrusted chain may be accepted, but the requested name must match.
+    const int error = X509_STORE_CTX_get_error(storeCtx);
+    if (error == X509_V_ERR_HOSTNAME_MISMATCH ||
+        error == X509_V_ERR_IP_ADDRESS_MISMATCH)
+        return 0;
+#else
+    (void)storeCtx;
+#endif
     return 1;
 }
 }  // namespace
@@ -832,12 +860,17 @@ struct OpenSSLProvider : public TLSProvider, public NonCopyable
     OpenSSLProvider(TcpConnection *conn, TLSPolicyPtr policy, SSLContextPtr ctx)
         : TLSProvider(conn, std::move(policy), std::move(ctx))
     {
+        ssl_ = SSL_new(contextPtr_->ctx());
         rbio_ = BIO_new(BIO_s_mem());
         wbio_ = BIO_new(BIO_s_mem());
-        ssl_ = SSL_new(contextPtr_->ctx());
-        assert(ssl_);
-        assert(rbio_);
-        assert(wbio_);
+        if (!ssl_ || !rbio_ || !wbio_)
+        {
+            BIO_free(rbio_);
+            BIO_free(wbio_);
+            SSL_free(ssl_);
+            throw std::runtime_error("Failed to allocate OpenSSL connection");
+        }
+
         SSL_set_bio(ssl_, rbio_, wbio_);
         SSL_set_ex_data(ssl_, providerIndex(), this);
         SSL_set_mode(ssl_,
@@ -867,6 +900,28 @@ struct OpenSSLProvider : public TLSProvider, public NonCopyable
         else
         {
             assert(ssl_);
+
+#if OPENSSL_VERSION_NUMBER >= 0x10002000L && !defined(LIBRESSL_VERSION_NUMBER)
+            if (contextPtr_->validate && !contextPtr_->hostname.empty())
+            {
+                // These verification-parameter APIs were added in OpenSSL
+                // 1.0.2; direct X509_check_* calls are deprecated in 4.1.
+                auto *param = SSL_get0_param(ssl_);
+                const auto &hostname = contextPtr_->hostname;
+                const int configured =
+                    internal::isIpLiteral(hostname)
+                        ? X509_VERIFY_PARAM_set1_ip_asc(param, hostname.c_str())
+                        : X509_VERIFY_PARAM_set1_host(param,
+                                                      hostname.data(),
+                                                      hostname.size());
+                if (configured != 1)
+                {
+                    handleSSLError(SSLError::kSSLInvalidCertificate);
+                    dispatchEvents();
+                    return;
+                }
+            }
+#endif
 
             const auto &protocols = contextPtr_->alpnProtocols;
             if (!protocols.empty())
@@ -1620,9 +1675,14 @@ SSLContextPtr trantor::newSSLContext(const TLSPolicy &policy, bool isServer)
             ctx->ctx(),
             static_cast<int (*)(SSL *, int *, void *)>(
                 &OpenSSLProvider::selectServerCertificate));
+#ifndef LIBRESSL_VERSION_NUMBER
+        // LibreSSL lacks SSL_CTX_set_cert_cb(). There, the certificate is
+        // selected by the servername callback only, so clients not sending
+        // SNI won't get a certificate.
         SSL_CTX_set_cert_cb(ctx->ctx(),
                             &OpenSSLProvider::configureServerCertificate,
                             nullptr);
+#endif
         // A resumed handshake may not select a certificate at all. Do not
         // resume one without consulting the current runtime provider.
         SSL_CTX_set_session_cache_mode(ctx->ctx(), SSL_SESS_CACHE_OFF);
